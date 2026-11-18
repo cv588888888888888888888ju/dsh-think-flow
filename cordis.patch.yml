@@ -30,7 +30,7 @@
 #   translateCachePath          译文缓存路径（默认 ~/.dsh/think-flow/translations.json）
 - insert:
     - id: think-flow
-      name: '@yfwu2020/dsh-think-flow'
+      name: dsh-think-flow-zh
       config:
         # 默认值即推荐值，一般不用改
         sseThrottleMs: 120

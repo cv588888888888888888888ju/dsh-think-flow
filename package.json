@@ -1,11 +1,11 @@
 {
-  "name": "@yfwu2020/dsh-think-flow",
-  "version": "0.3.3",
-  "description": "DSH 思维链可视化：把模型的实时思考按 turn → step →（思考原文 + 工具调用）聚合成可读的右侧栏视图",
+  "name": "dsh-think-flow-zh",
+  "version": "0.4.0",
+  "description": "DSH 思维链可视化（中文增强 fork）：在把实时思考按 turn → step 聚合的基础上，用**另一个模型**给每一步生成中文标题与中文解释、给整轮生成中文标题，主模型的提示词与上下文一概不动",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
-  "author": "yfwu2020",
+  "author": "yfwu2020 (upstream), fork maintained by chenty",
   "license": "MIT",
   "keywords": [
     "dsh",
@@ -20,17 +20,18 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yfwu2020/dsh-think-flow.git"
+    "url": "git+https://github.com/cv588888888888888888888ju/dsh-think-flow.git"
   },
-  "homepage": "https://github.com/yfwu2020/dsh-think-flow#readme",
+  "homepage": "https://github.com/cv588888888888888888888ju/dsh-think-flow#readme",
   "bugs": {
-    "url": "https://github.com/yfwu2020/dsh-think-flow/issues"
+    "url": "https://github.com/cv588888888888888888888ju/dsh-think-flow/issues"
   },
   "files": [
     "lib",
     "src",
     "cordis.patch.yml",
     "README.md",
+    "PATCHES.md",
     "LICENSE"
   ],
   "peerDependencies": {

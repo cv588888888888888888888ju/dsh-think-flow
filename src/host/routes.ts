@@ -66,6 +66,8 @@ export function registerRoutes(ctx: Context, config: Config, { sessions, stats, 
       },
     }
     e.subs.add(sub)
+    // fork：配了 autoTitlesOn 就在有人看这个会话时自动臂上（不必再点「自动」按钮）
+    titles.armAuto(sessionId)
 
     // 先给一份快照，前端据此建结构；之后只收增量。
     // 放在 hydrate 之后发：旧会话要先把历史折进来，否则前端收到的是空快照。
@@ -264,10 +266,14 @@ export function registerRoutes(ctx: Context, config: Config, { sessions, stats, 
        * 18：AI 总结的字重回落到设计系统 token（`--dsw-font-xxs-strong-12` = 500）。
        *    实测 500 与 600 的墨量只差 8%（5.87% vs 6.34%），肉眼几乎一样 ——
        *    主要区别在颜色那一档（primary vs tertiary），没必要脱离字级表。
+       * 26：提示词加一条「标题不要夹英文单词」（dsh / JSON 这类专有名词除外）——
+       *    hy4-flash-free 会写出「判断需求 Design 边界」这种半英半中的标题。
+       * 27：标题生成**分段**（每段 ≤10 步）—— 一轮 113 步时一次性要 113 条标题，
+       *    模型必然少给，条数校验一挡整轮全空（实测就是面板一片没标题）。
        * 改宿主代码后 `dsh web` 必须重启（ESM 缓存），重启完用
        * `curl -s localhost:3080/think-flow/api/ping` 看这个号对不对。
        */
-      build: 24,
+      build: 27,
       sessions: sessions.size,
       stats,
       config,

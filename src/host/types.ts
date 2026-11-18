@@ -20,8 +20,8 @@ export interface Subscriber {
  */
 export interface TitleCacheEntry {
   at: number
-  /** 步号 → { 标题, 该步思考的指纹 }。 */
-  steps?: Record<string, { title: string; print: string }>
+  /** 步号 → { 标题, 该步思考的指纹, 可选的中文解释 }。 */
+  steps?: Record<string, { title: string; print: string; explain?: string }>
   /** 工具 id → { 中文说明, 英文原文指纹 }。 */
   notes?: Record<string, { note: string; print: string }>
   /**

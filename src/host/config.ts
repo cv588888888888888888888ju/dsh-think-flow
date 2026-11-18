@@ -54,6 +54,15 @@ export interface Config {
   titleTotalChars: number
   /** 生成中文标题的推理档位（标题是压缩任务，低档就够）。 */
   titleReasoningEffort: string
+  /**
+   * 起标题专用的模型路由（fork 新增）。两者都非空才生效；留空 = 沿用主会话默认模型。
+   * 填 provider="opencode2dsh" / model="big-pickle" 就把这件旁路活交给免费模型：
+   * 主模型的提示词、工具调用、上下文一概不动，只有插件自己额外发一次请求。
+   */
+  titleProvider: string
+  titleModel: string
+  /** 打开面板就自动起标题（fork 新增）。原本要点一下「自动」按钮，且重启即失效。 */
+  autoTitlesOn: boolean
   /** 标题缓存文件路径。'' = 默认的 ~/.dsh/think-flow/titles.json（测试用临时目录覆盖）。 */
   titleCachePath: string
   /** 自动标题节拍器间隔（毫秒）。调小只为测试。 */
@@ -137,6 +146,9 @@ export const Config = z.object({
   titleStepChars: z.number().min(80).max(4000).default(420),
   titleTotalChars: z.number().min(2000).max(200000).default(24000),
   titleReasoningEffort: z.string().default('low'),
+  titleProvider: z.string().default(''),
+  titleModel: z.string().default(''),
+  autoTitlesOn: z.boolean().default(false),
   titleCachePath: z.string().default(''),
   autoTickMs: z.number().min(20).max(60_000).default(5000),
   /**
@@ -173,6 +185,9 @@ export function resolveConfig(rawConfig: Config): Config {
     titleStepChars: rawConfig?.titleStepChars ?? 420,
     titleTotalChars: rawConfig?.titleTotalChars ?? 24000,
     titleReasoningEffort: rawConfig?.titleReasoningEffort ?? 'low',
+    titleProvider: rawConfig?.titleProvider ?? '',
+    titleModel: rawConfig?.titleModel ?? '',
+    autoTitlesOn: rawConfig?.autoTitlesOn ?? false,
     titleCachePath: rawConfig?.titleCachePath ?? '',
     autoTickMs: rawConfig?.autoTickMs ?? 5000,
     resyncSilenceMs: rawConfig?.resyncSilenceMs ?? 15_000,

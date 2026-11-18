@@ -4,11 +4,24 @@
 > 把模型的实时思考按 **`turn → step →（思考原文 + 工具调用）`** 聚合成能读的结构：
 > 每一步在干嘛、调了什么工具、它在读哪个文件、**哪一段正在等外部接口**。
 
-[![release](https://img.shields.io/github/v/release/yfwu2020/dsh-think-flow?label=release)](https://github.com/yfwu2020/dsh-think-flow/releases)
-[![npm](https://img.shields.io/npm/v/@yfwu2020/dsh-think-flow?label=npm)](https://www.npmjs.com/package/@yfwu2020/dsh-think-flow)
+> ## 中文增强 fork（本仓库相对上游 `yfwu2020/dsh-think-flow` 0.3.3 的改动）
+>
+> 上游只把英文思考折成结构；本 fork 让**另一个模型**（而不是主会话的模型）读这段思考，
+> 给每一步写一行**中文标题 + 中文解释**、给整轮写一条**中文标题**。
+>
+> - **主模型零改动**：不注入系统提示词、不新增工具、不动上下文。旁路模型只是插件自己多发一次请求 —— 这就是「不影响主模型工作，但有人维护可视化状态」。
+> - **标题/解释走哪个模型可配**：`titleProvider` + `titleModel`，两个都填才生效；空 = 沿用主会话默认模型（上游行为）。配合免费的 OpenAI 兼容通道可以零成本跑。
+> - **不机翻**：解释是模型直接写的中文，不是把英文原文过一遍翻译器；原文照旧可展开看。
+> - **打开面板就自动补**：`autoTitlesOn: true`，不必每个会话点一次「自动」，宿主重启也不丢。
+> - **长轮不再一片空白**：标题生成按每段 ≤10 步**切段**调用，100+ 步的轮次也能逐段补全（上游一次调用要上百条标题，模型少给就整批丢弃）。
+> - 构建产物与上游同构：`src/` 已同步，`npm ci && npm run build` 可复现 `lib/`；`npm test` 全绿。
+>
+> 详细改动清单见 [PATCHES.md](./PATCHES.md)。`build` 号见 `/think-flow/api/ping`（本 fork 为 **27**）。
+
+[![release](https://img.shields.io/github/v/release/cv588888888888888888888ju/dsh-think-flow?label=release)](https://github.com/cv588888888888888888888ju/dsh-think-flow/releases)
 [![license](https://img.shields.io/badge/license-MIT-green)](./package.json)
 [![tests](https://img.shields.io/badge/tests-passing-brightgreen)](./tests)
-[![DSH plugin](https://img.shields.io/badge/DSH-plugin-8b5cf6)](https://github.com/yfwu2020/dsh-think-flow)
+[![DSH plugin](https://img.shields.io/badge/DSH-plugin-8b5cf6)](https://github.com/cv588888888888888888888ju/dsh-think-flow)
 
 ---
 
@@ -84,11 +97,11 @@
 ## 安装
 
 ```bash
-# 从 npm（推荐）
-dsh plugin --profile web add @yfwu2020/dsh-think-flow
+# 从 GitHub Release 的 tgz（推荐：本 fork 没有发布到 npm）
+dsh plugin --profile web add https://github.com/cv588888888888888888888ju/dsh-think-flow/releases/latest/download/dsh-think-flow-zh-0.4.0.tgz
 
-# 或从 GitHub Release 的 tgz（同一个产物，不走 npm）
-dsh plugin --profile web add /path/to/yfwu2020-dsh-think-flow-0.3.3.tgz
+# 或下载后用本地路径
+dsh plugin --profile web add /path/to/dsh-think-flow-zh-0.4.0.tgz
 
 # 或从本地目录（开发用：改完不用重装，只重建）
 dsh plugin --profile web add link:/path/to/dsh-think-flow
@@ -98,8 +111,8 @@ dsh plugin --profile web add link:/path/to/dsh-think-flow
 
 | 位置 | 内容 |
 | --- | --- |
-| `~/.dsh/profiles/web/package.json` | `"@yfwu2020/dsh-think-flow": "<版本或 link:路径>"` |
-| `~/.dsh/profiles/web/node_modules/@yfwu2020/dsh-think-flow` | 软链 → 插件目录 |
+| `~/.dsh/profiles/web/package.json` | `"dsh-think-flow-zh": "<版本或 link:路径>"` |
+| `~/.dsh/profiles/web/node_modules/dsh-think-flow-zh` | 软链 → 插件目录 |
 | profile 的 `dsh.profile.bundles` | 包名（**按包名引用，与路径无关**） |
 
 打开方式有两个：**会话头部那个折线图标**，或者右侧栏标签条上的「思维链」。
@@ -138,7 +151,10 @@ dsh plugin --profile web add link:/path/to/dsh-think-flow
 | `snapshotTailChars` | `4000` | 200–20000 | 连接快照里给"当前步"带多少字符原文（其余步骤走 `/step` 按需取） |
 | `titleStepChars` | `420` | 80–4000 | 生成中文标题时，每一步最多喂多少字思考原文 |
 | `titleTotalChars` | `24000` | 2000–200000 | 一次标题请求的字符上限（整轮一起总结，**一次调用**） |
-| `titleReasoningEffort` | `'low'` | — | 生成标题的推理档位（压缩任务，低档就够） |
+| `titleReasoningEffort` | `'low'` | — | 生成标题的推理档位（压缩任务，低档就够）。**免费通道填 `'off'`**：填 `'none'` 会被直接拒绝 |
+| `titleProvider` | `''` | — | **fork 新增**。起标题用的 provider id（与 `titleModel` 同时非空才生效；空 = 主会话默认模型） |
+| `titleModel` | `''` | — | **fork 新增**。起标题用的 model id |
+| `autoTitlesOn` | `false` | — | **fork 新增**。有人打开面板就自动补标题（原版每会话手点「自动」且重启即失效） |
 | `titleCachePath` | `''` | — | 标题缓存路径。空 = `~/.dsh/think-flow/titles.json` |
 | `autoTickMs` | `5000` | 20–60000 | 自动标题（面板上的「实时」）的节拍器间隔 |
 | `maxHydrateEvents` | `20000` | 0–200000 | 历史回看时最多折入多少条落盘事件（从最新往回取） |
@@ -479,4 +495,4 @@ ESM 缓存里还是旧代码）；**client 半刷新页面即可**。
 
 ## 许可
 
-[MIT](./LICENSE) © 2026 yfwu2020
+[MIT](./LICENSE) © 2026 yfwu2020 · 中文增强 fork 由 chenty 维护

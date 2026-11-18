@@ -3,7 +3,7 @@ import { fmtK, fmtDur, stepDurMs } from '../rules/format.js'
 import { toolTitleRuns, runText, stepTitleLines, cleanProse, DOT, THINK_TITLE, stepHasThinking, noTitleNote, stepOwnTitle } from '../rules/titles.js'
 
 /** Render one step from current view state and explicit interaction callbacks. */
-export function createStepRenderer(React, { expanded, indexOfTurn, navigation, sessionId, titlesRef, skey, notesRef, fetchedRef, toggleStep, ensureStepText, view, translation }) {
+export function createStepRenderer(React, { expanded, indexOfTurn, navigation, sessionId, titlesRef, explainsRef, skey, notesRef, fetchedRef, toggleStep, ensureStepText, view, translation }) {
   const { locateMainStep } = navigation
   const { tlTail, tlCompose, tlEnabled } = translation
   /** 工具 chip 的 tooltip：把行内放不下的信息放这儿。 */
@@ -277,6 +277,15 @@ export function createStepRenderer(React, { expanded, indexOfTurn, navigation, s
         if (willOpen && needFetch) ensureStepText(turnNo, step.step)
       } : undefined,
     }, rowKids)]
+    // fork：模型给的中文解释 —— 标题下面一行（两行封顶），说清这一步在查什么、为什么
+    var explainOfStep = (explainsRef.current[skey(turnNo)] || {})[step.step]
+    if (typeof explainOfStep === 'string' && explainOfStep !== '') {
+      kids.push(React.createElement('div', {
+        className: 'tf-step-explain',
+        key: 'ex',
+        title: explainOfStep,
+      }, explainOfStep))
+    }
 
     if (s === 'waiting' && runningTool) {
       var waitMs = Math.max(0, Date.now() - runningTool.startedAt)

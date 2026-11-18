@@ -31,6 +31,8 @@ export function createSnapshots(config: Config, sessions: Map<string, SessionEnt
     // 缓存是**按步存**的，所以逐条判"这一步的内容还是不是当初那份"（指纹对得上才下发）——
     // 增量生成意味着同一轮里有的步有标题、有的还没轮到。
     const titlesByStep: Record<string, string> = {}
+    // fork：每条标题配套的中文解释，同样按步号索引、同样要指纹对得上
+    const explainsByStep: Record<string, string> = {}
     const notesByTool: Record<string, string> = {}
     // 整轮标题同样要指纹对得上才下发（本轮最后的输出变了，旧标题就不作数了）
     const cachedTurnTitle = cachedTitles?.title !== undefined && cachedTitles.title.print === turnPrint(turn)
@@ -39,7 +41,10 @@ export function createSnapshots(config: Config, sessions: Map<string, SessionEnt
     if (cachedTitles !== undefined) {
       for (const step of turn.steps) {
         const hit = cachedTitles.steps?.[String(step.step)]
-        if (hit !== undefined && hit.print === stepPrint(step)) titlesByStep[String(step.step)] = hit.title
+        if (hit !== undefined && hit.print === stepPrint(step)) {
+          titlesByStep[String(step.step)] = hit.title
+          if (typeof hit.explain === 'string' && hit.explain !== '') explainsByStep[String(step.step)] = hit.explain
+        }
       }
       for (const step of turn.steps) {
         for (const tool of step.tools) {
@@ -55,6 +60,8 @@ export function createSnapshots(config: Config, sessions: Map<string, SessionEnt
       endReason: turn.endReason,
       interrupted,
       titles: Object.keys(titlesByStep).length > 0 ? titlesByStep : undefined,
+      // fork：一步一句中文解释（"这一步在查什么、为什么"）—— 客户端显示在标题下面一行
+      explains: Object.keys(explainsByStep).length > 0 ? explainsByStep : undefined,
       // **整轮标题**（一句话说清这一轮）—— 轮头第一行用它
       turnTitle: cachedTurnTitle,
       // 默认素材：本轮用户说了什么。还没总结（或这一轮还在跑）时，轮头第一行直接显示它。

@@ -98,8 +98,15 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     }
   }
 
-  /** 解析模型路由：优先用设置里的默认模型，退回任意可用 provider。 */
+  /**
+   * 解析模型路由（fork 改）：**先**用配置里的 titleProvider/titleModel ——
+   * 这两个键存在的意义就是把这件旁路活（给思考起标题）交给别的模型（比如免费 lane），
+   * 主模型的提示词、工具调用、上下文一概不动。两者都没配才退回主模型。
+   */
   function resolveRoute(): { provider: string; model: string } | undefined {
+    if (config.titleProvider !== '' && config.titleModel !== '') {
+      return { provider: config.titleProvider, model: config.titleModel }
+    }
     const service = ctx.get('agentDefaultModel') as { currentSelection?: () => { provider?: string; model?: string } } | undefined
     const selection = service?.currentSelection?.()
     if (selection?.provider && selection?.model) return { provider: selection.provider, model: selection.model }
@@ -177,27 +184,21 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     return { steps, notes, turnOutput: wantTurnTitle ? output : '' }
   }
 
-  /**
-   * 给**一批**步骤 / 说明起标题（一次模型调用）。
-   *
-   * @param sessionId - 会话 id（模型调用要带）。
-   * @param pending - 待生成的步骤与说明。
-   * @returns 这一次生成的 titles（步号 → 标题）、notes（工具 id → 中文）与所用模型。
-   */
-  async function generateBatch(
-    sessionId: string,
-    pending: { steps: TitleInputStep[]; notes: TitleInputNote[]; turnOutput?: string },
-  ): Promise<{ titles: Record<string, string>; notes: Record<string, string>; turnTitle?: string; model: string; error?: string }> {
-    const { steps: inputs, notes: notesIn } = pending
-    const turnOutput = pending.turnOutput ?? ''
-    const empty: { titles: Record<string, string>; notes: Record<string, string>; turnTitle?: string; model: string } =
-      { titles: {}, notes: {}, model: '' }
-    // 注意：只要还有"整轮标题"要写，就不算没事干
-    if (inputs.length === 0 && notesIn.length === 0 && turnOutput === '') return empty
-    const route = resolveRoute()
-    if (route === undefined) return { ...empty, error: '找不到可用的模型路由' }
-    const model = `${route.provider}/${route.model}`
+  /** 单次模型调用最多塞多少步：再多模型就记不住「必须回同样条数」，整批会被判条数不符而丢弃。 */
+  const MAX_STEPS_PER_CALL = 10
 
+  /**
+   * 一次模型调用：给这一小批步骤起标题。
+   *
+   * @returns 成功给 {titles, explains, notes, turnTitle?}，失败给 {error}。
+   */
+  async function callOnce(
+    sessionId: string,
+    route: { provider: string; model: string },
+    inputs: TitleInputStep[],
+    notesIn: TitleInputNote[],
+    turnOutput: string,
+  ): Promise<{ titles: Record<string, string>; explains: Record<string, string>; notes: Record<string, string>; turnTitle?: string; error?: string }> {
     const budget: TitleBudget = { perStepChars: config.titleStepChars, totalChars: config.titleTotalChars }
     const controller = new AbortController()
     inflight.add(controller)
@@ -224,7 +225,7 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
         if (chunk.type === 'text-delta') raw += chunk.text
       }
     } catch (error) {
-      return { ...empty, model, error: `生成失败：${String((error as Error)?.message ?? error)}` }
+      return { titles: {}, explains: {}, notes: {}, error: `生成失败：${String((error as Error)?.message ?? error)}` }
     } finally {
       clearTimeout(timer)
       inflight.delete(controller)
@@ -232,15 +233,26 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
 
     // 没有思考的轮次（只有说明要翻）不检查 titles 条数
     const parsed = inputs.length === 0
-      ? { titles: [] as string[], notes: parseTitles(raw, 0)?.notes ?? {}, turnTitle: parseTitles(raw, 0)?.turnTitle ?? '' }
+      ? {
+          titles: [] as string[],
+          explains: [] as string[],
+          notes: parseTitles(raw, 0)?.notes ?? {},
+          turnTitle: parseTitles(raw, 0)?.turnTitle ?? '',
+        }
       : parseTitles(raw, inputs.length)
     if (parsed === undefined) {
-      // 条数对不上就宁可报错：错位的标题比没有标题更糟（这正是当初否掉本地规则的理由）
-      return { ...empty, model, error: '模型返回的标题条数与步骤数不一致，未采用' }
+      // 条数对不上就报错：错位的标题比没有标题更糟（这正是当初否掉本地规则的理由）
+      return { titles: {}, explains: {}, notes: {}, error: '模型返回的标题条数与步骤数不一致，未采用' }
     }
 
     const titles: Record<string, string> = {}
-    inputs.forEach((s, i) => { titles[String(s.step)] = parsed.titles[i] })
+    const explains: Record<string, string> = {}
+    inputs.forEach((s, i) => {
+      titles[String(s.step)] = parsed.titles[i]
+      // 解释可能缺（老格式 / 模型漏写）：缺了就只存标题，客户端那行不渲染
+      const ex = parsed.explains[i]
+      if (typeof ex === 'string' && ex !== '') explains[String(s.step)] = ex
+    })
     // 只保留**确实要过**的 id：模型偶尔会自己编几个 key 出来
     const wanted = new Set(notesIn.map((n) => n.id))
     const notes: Record<string, string> = {}
@@ -252,14 +264,68 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
      * `pendingOf` 每次都判"还缺整轮标题" → 节拍器**无限重复调模型**（测试抓到过）。
      */
     const turnTitle = turnOutput === '' ? undefined : parsed.turnTitle
-    return { titles, notes, ...(turnTitle !== undefined ? { turnTitle } : {}), model }
+    return { titles, explains, notes, ...(turnTitle !== undefined ? { turnTitle } : {}) }
+  }
+
+  /**
+   * 给**一批**步骤 / 说明起标题。
+   *
+   * fork：一批超过 MAX_STEPS_PER_CALL 就**分段**调模型再拼起来 —— 一轮 100+ 步时
+   * 一次性要 100 条标题，模型必然少给，条数校验一挡就整轮都没有（实测 113 步的轮次全空）。
+   * 分段后每段各自过条数校验，某段失败只影响那几步，其余照常落盘。
+   *
+   * @param sessionId - 会话 id（模型调用要带）。
+   * @param pending - 待生成的步骤与说明。
+   * @returns 这一次生成的 titles（步号 → 标题）、notes（工具 id → 中文）与所用模型。
+   */
+  async function generateBatch(
+    sessionId: string,
+    pending: { steps: TitleInputStep[]; notes: TitleInputNote[]; turnOutput?: string },
+  ): Promise<{ titles: Record<string, string>; explains: Record<string, string>; notes: Record<string, string>; turnTitle?: string; model: string; error?: string }> {
+    const { steps: inputs, notes: notesIn } = pending
+    const turnOutput = pending.turnOutput ?? ''
+    const empty: { titles: Record<string, string>; explains: Record<string, string>; notes: Record<string, string>; turnTitle?: string; model: string } =
+      { titles: {}, explains: {}, notes: {}, model: '' }
+    // 注意：只要还有"整轮标题"要写，就不算没事干
+    if (inputs.length === 0 && notesIn.length === 0 && turnOutput === '') return empty
+    const route = resolveRoute()
+    if (route === undefined) return { ...empty, error: '找不到可用的模型路由' }
+    const model = `${route.provider}/${route.model}`
+
+    const chunks: TitleInputStep[][] = []
+    for (let i = 0; i < inputs.length; i += MAX_STEPS_PER_CALL) chunks.push(inputs.slice(i, i + MAX_STEPS_PER_CALL))
+    if (chunks.length === 0) chunks.push([])
+
+    const titles: Record<string, string> = {}
+    const explains: Record<string, string> = {}
+    const notes: Record<string, string> = {}
+    let turnTitle: string | undefined
+    let lastError: string | undefined
+    for (let ci = 0; ci < chunks.length; ci += 1) {
+      const isLast = ci === chunks.length - 1
+      // 工具说明与整轮输出各只要一次，摊在第一段 / 最后一段上，别每段都发
+      const got = await callOnce(sessionId, route, chunks[ci], ci === 0 ? notesIn : [], isLast ? turnOutput : '')
+      if (got.error !== undefined) {
+        lastError = got.error
+        continue
+      }
+      Object.assign(titles, got.titles)
+      Object.assign(explains, got.explains)
+      Object.assign(notes, got.notes)
+      if (got.turnTitle !== undefined) turnTitle = got.turnTitle
+    }
+    // 一段都没成：把最后一次的错误交上去（手动点按钮那条路要让用户看见原因）
+    if (Object.keys(titles).length === 0 && Object.keys(notes).length === 0 && turnTitle === undefined) {
+      return { ...empty, model, error: lastError ?? '模型没有返回任何标题' }
+    }
+    return { titles, explains, notes, ...(turnTitle !== undefined ? { turnTitle } : {}), model }
   }
 
   /** 把一次生成的结果合并进缓存并落盘。 */
   async function mergeIntoCache(
     sessionId: string,
     turn: TurnFact,
-    got: { titles: Record<string, string>; notes: Record<string, string>; turnTitle?: string },
+    got: { titles: Record<string, string>; explains?: Record<string, string>; notes: Record<string, string>; turnTitle?: string },
     model: string,
   ): Promise<void> {
     const key = `${sessionId}:${turn.turn}`
@@ -272,7 +338,14 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     const steps = { ...(entry.steps ?? {}) }
     for (const s of turn.steps) {
       const t = got.titles[String(s.step)]
-      if (t !== undefined) steps[String(s.step)] = { title: t, print: stepPrint(s) }
+      if (t !== undefined) {
+        const ex = got.explains?.[String(s.step)]
+        steps[String(s.step)] = {
+          title: t,
+          ...(typeof ex === 'string' && ex !== '' ? { explain: ex } : {}),
+          print: stepPrint(s),
+        }
+      }
     }
     const notes = { ...(entry.notes ?? {}) }
     for (const s of turn.steps) {
@@ -313,18 +386,22 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     force = false,
     /** 手动点按钮时为 true：整轮标题不等轮结束，按当前输出先写一版。 */
     turnTitleAnyway = false,
-  ): Promise<{ titles: Record<string, string>; notes: Record<string, string>; turnTitle?: string; cached: boolean; error?: string }> {
+  ): Promise<{ titles: Record<string, string>; explains: Record<string, string>; notes: Record<string, string>; turnTitle?: string; cached: boolean; error?: string }> {
     const cache = await loadTitleCache()
     const entry = cache[`${sessionId}:${turn.turn}`]
 
     // 先把缓存里**还有效**的收起来（force 时不要）
     const titles: Record<string, string> = {}
+    const explains: Record<string, string> = {}
     const notes: Record<string, string> = {}
     let cachedTurnTitle: string | undefined
     if (!force && entry !== undefined) {
       for (const s of turn.steps) {
         const hit = entry.steps?.[String(s.step)]
-        if (hit !== undefined && hit.print === stepPrint(s)) titles[String(s.step)] = hit.title
+        if (hit !== undefined && hit.print === stepPrint(s)) {
+          titles[String(s.step)] = hit.title
+          if (typeof hit.explain === 'string' && hit.explain !== '') explains[String(s.step)] = hit.explain
+        }
       }
       for (const s of turn.steps) {
         for (const t of s.tools) {
@@ -342,17 +419,18 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     const nothingToDo = pending.steps.length === 0 && pending.notes.length === 0 && pending.turnOutput === ''
     if (nothingToDo) {
       if (Object.keys(titles).length === 0 && Object.keys(notes).length === 0 && cachedTurnTitle === undefined) {
-        return { titles: {}, notes: {}, cached: false, error: '这个 turn 还没有思考内容' }
+        return { titles: {}, explains: {}, notes: {}, cached: false, error: '这个 turn 还没有思考内容' }
       }
-      return { titles, notes, ...(cachedTurnTitle !== undefined ? { turnTitle: cachedTurnTitle } : {}), cached: true }
+      return { titles, explains, notes, ...(cachedTurnTitle !== undefined ? { turnTitle: cachedTurnTitle } : {}), cached: true }
     }
 
     const got = await generateBatch(sessionId, pending)
-    if (got.error !== undefined) return { titles, notes, cached: false, error: got.error }
+    if (got.error !== undefined) return { titles, explains, notes, cached: false, error: got.error }
     await mergeIntoCache(sessionId, turn, got, got.model)
     const turnTitle = got.turnTitle !== undefined && got.turnTitle !== '' ? got.turnTitle : cachedTurnTitle
     return {
       titles: { ...titles, ...got.titles },
+      explains: { ...explains, ...got.explains },
       notes: { ...notes, ...got.notes },
       ...(turnTitle !== undefined ? { turnTitle } : {}),
       cached: false,
@@ -387,11 +465,12 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     for (const sub of e.subs) send(sub, { t: 'autoBusy', busy })
   }
 
-  /** 把新生成的标题/说明推给正在看这个会话的面板。 */
+  /** 把新生成的标题/解释/说明推给正在看这个会话的面板。 */
   function pushTitles(
     sessionId: string,
     turn: number,
     titles: Record<string, string>,
+    explains: Record<string, string>,
     notes: Record<string, string>,
     turnTitle?: string,
   ): void {
@@ -399,10 +478,18 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     if (e === undefined) return
     // 什么都没变就别推：模型"要了但没给出整轮标题"时会产生一次空结果，
     // 白推一条 SSE 只会让面板空转一次重渲染。
-    const nothing = Object.keys(titles).length === 0 && Object.keys(notes).length === 0
+    const nothing = Object.keys(titles).length === 0 && Object.keys(explains).length === 0
+      && Object.keys(notes).length === 0
       && (turnTitle === undefined || turnTitle === '')
     if (nothing) return
-    for (const sub of e.subs) send(sub, { t: 'titles', turn, titles, notes, ...(turnTitle !== undefined ? { turnTitle } : {}) })
+    for (const sub of e.subs) {
+      send(sub, {
+        t: 'titles', turn, titles,
+        ...(Object.keys(explains).length > 0 ? { explains } : {}),
+        notes,
+        ...(turnTitle !== undefined ? { turnTitle } : {}),
+      })
+    }
   }
 
   /**
@@ -452,7 +539,7 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
       }
       if (got.error !== undefined) continue
       await mergeIntoCache(sessionId, turn, got, got.model)
-      pushTitles(sessionId, turn.turn, got.titles, got.notes, got.turnTitle)
+      pushTitles(sessionId, turn.turn, got.titles, got.explains, got.notes, got.turnTitle)
     }
   }
 
@@ -467,13 +554,27 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
   function markDirty(sessionId: string): void {
     if (autoTitles.has(sessionId)) autoDirty.add(sessionId)
   }
+  /**
+   * fork：配置 autoTitlesOn=true 时，面板一连上就把这个会话臂上。
+   *
+   * 原版要用户每开一个会话点一次「自动」，而且宿主重启就丢 —— 那不是"维护状态"，
+   * 是要用户维护插件的状态。臂上之后仍受原有三道闸门管（要有人看、攒够步、限速），
+   * 且标题走的是 titleProvider/titleModel 指定的（免费）模型。
+   * @param sessionId - 会话 id。
+   */
+  function armAuto(sessionId: string): void {
+    if (config.autoTitlesOn !== true) return
+    if (autoTitles.has(sessionId)) return
+    autoTitles.add(sessionId)
+    autoDirty.add(sessionId)
+  }
   function setAuto(sessionId: string, on: boolean): void {
     if (on) { autoTitles.add(sessionId); autoDirty.add(sessionId) }
     else { autoTitles.delete(sessionId); autoDirty.delete(sessionId) }
   }
   return {
     get cache() { return titleCache },
-    loadTitleCache, generateTitles, titleOfTurn, markDirty, setAuto,
+    loadTitleCache, generateTitles, titleOfTurn, markDirty, setAuto, armAuto,
     isAuto: (sessionId: string) => autoTitles.has(sessionId),
     isBusy: (sessionId: string) => autoBusy.has(sessionId),
   }

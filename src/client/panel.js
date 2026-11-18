@@ -91,6 +91,8 @@ export function createPanel(React, { API, translation, navigation, styles, viewS
      */
     var turnTitleRef = React.useRef({})
     var titlesRef = React.useRef({})
+    // fork：步号 → 中文解释（模型给的"这一步在查什么/为什么"），和 titles 同源同指纹
+    var explainsRef = React.useRef({})
     /**
      * 工具说明的**中文翻译**：工具 id → 中文（模型生成，随快照与 /titles 下发）。
      *
@@ -243,6 +245,10 @@ export function createPanel(React, { API, translation, navigation, styles, viewS
               if (incoming !== undefined && incoming !== null && typeof incoming === 'object') {
                 titlesRef.current[skey(st.turns[i].turn)] = Object.assign({}, incoming)
               }
+              var incomingExplains = st.turns[i].explains
+              if (incomingExplains !== undefined && incomingExplains !== null && typeof incomingExplains === 'object') {
+                explainsRef.current[skey(st.turns[i].turn)] = Object.assign({}, incomingExplains)
+              }
               // 空串 = 宿主"试过但没总结出东西" → 当没有，回落到默认素材（本轮用户消息）
               if (st.turns[i].turnTitle !== undefined && st.turns[i].turnTitle !== null && String(st.turns[i].turnTitle) !== '') {
                 turnTitleRef.current[skey(st.turns[i].turn)] = String(st.turns[i].turnTitle)
@@ -265,6 +271,9 @@ export function createPanel(React, { API, translation, navigation, styles, viewS
             // 自动标题是**推**过来的（不是我们请求的）：合并进缓存并重渲染
             if (msg.turn !== undefined && msg.titles) {
               titlesRef.current[skey(msg.turn)] = Object.assign({}, titlesRef.current[skey(msg.turn)] || {}, msg.titles)
+            }
+            if (msg.turn !== undefined && msg.explains) {
+              explainsRef.current[skey(msg.turn)] = Object.assign({}, explainsRef.current[skey(msg.turn)] || {}, msg.explains)
             }
             if (msg.turnTitle !== undefined && String(msg.turnTitle) !== '') turnTitleRef.current[skey(msg.turn)] = String(msg.turnTitle)
             if (msg.notes) {
@@ -488,7 +497,7 @@ export function createPanel(React, { API, translation, navigation, styles, viewS
     if (st.state === 'unreadable') errChip = { cls: 'is-err', txt: '异常' }
     else if (sessionId && !st.connected) errChip = { cls: 'is-err', txt: '断线' }
     var renderStep = createStepRenderer(React, {
-      expanded, indexOfTurn, navigation, sessionId, titlesRef, skey, notesRef,
+      expanded, indexOfTurn, navigation, sessionId, titlesRef, explainsRef, skey, notesRef,
       fetchedRef, toggleStep, ensureStepText, view, translation,
     })
 
@@ -532,6 +541,7 @@ export function createPanel(React, { API, translation, navigation, styles, viewS
         .then(function (d) {
           if (d && d.ok && d.titles) {
             titlesRef.current[skey(turnNo)] = d.titles
+            if (d.explains) explainsRef.current[skey(turnNo)] = d.explains
             if (d.turnTitle !== undefined && String(d.turnTitle) !== '') turnTitleRef.current[skey(turnNo)] = String(d.turnTitle)
             if (d.notes) for (var nk in d.notes) if (Object.prototype.hasOwnProperty.call(d.notes, nk)) notesRef.current[nk] = d.notes[nk]
             setGenState({ busyTurn: null, error: null })

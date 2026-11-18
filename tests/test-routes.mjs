@@ -456,7 +456,7 @@ console.log('\n⑩ /titles')
   ok('首次不是缓存命中', out.cached === false)
   ok('调用了一次模型', llm.calls.length === 1, llm.calls.length)
   ok('请求带上了 provider/model', llm.calls[0].provider === 'p' && llm.calls[0].model === 'm')
-  ok('用 system 传达了"只输出 JSON"', JSON.stringify(llm.calls[0].messages).includes('titles'))
+  ok('用 system 传达了"只输出 JSON"', JSON.stringify(llm.calls[0].messages).includes('steps'))
 
   // 第二次应命中缓存，不再调用模型
   const r3 = fakeRes()

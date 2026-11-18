@@ -37,6 +37,9 @@ export interface TitleBudget {
   totalChars: number
 }
 
+/** 单条中文解释最多保留多少字（模型跑题时截断，界面上本来也只显示一行）。 */
+export const MAX_EXPLAIN_CHARS = 240
+
 /** 默认预算：够模型判断"这一步在干嘛"，又不至于把一次调用撑爆。 */
 export const DEFAULT_BUDGET: TitleBudget = { perStepChars: 420, totalChars: 24000 }
 
@@ -70,13 +73,17 @@ export function allocateChars(steps: readonly TitleInputStep[], budget: TitleBud
 
 /** 提示词的 system 部分：只要 JSON，不要解释。 */
 export const TITLE_SYSTEM = [
-  '你把编码智能体的英文思维链压缩成中文短标题。',
+  '你把编码智能体的英文思维链压缩成中文的「标题 + 解释」—— 读者是中文母语者，没耐心读英文原文。',
   '用户会给你若干步骤，每步包含编号、该步思考的原文片段、以及它调用的工具。',
-  '为**每一步**写一条中文标题：',
-  '- 长度 8~18 个汉字，动词或结论开头（如「确认」「核对」「排除」「读」「盘点」「收束」）。',
-  '- 说清这一步**在做什么**或**得出了什么**，不要复述原文，不要写"思考""分析"这种空词。',
-  '- 不要编号、不要标点结尾、不要引号、不要换行。',
-  '- 如果这一步得出了明确结论，标题里就体现结论（例如「确认插件按包名装入」），而不是写"查看插件"。',
+  '为**每一步**给两样东西：',
+  '① title —— 8~18 个汉字的中文短标题，动词或结论开头（如「确认」「核对」「排除」「读」「盘点」「收束」）。',
+  '  - 说清这一步**在做什么**或**得出了什么**，不要复述原文，不要写"思考""分析"这种空词。',
+  '  - 如果这一步得出了明确结论，标题里就体现结论（例如「确认插件按包名装入」），而不是写"查看插件"。',
+  '  - 不要编号、不要标点结尾、不要引号、不要换行。',
+  '  - **不要夹英文单词**（dsh / JSON / SSE 这类专有名词可以保留），宁可换个说法。',
+  '② explain —— 20~60 个汉字的中文解释，一到两句话，说清这一步**在查什么 / 为什么这么查 / 得出了什么**。',
+  '  - 它是标题的补充而不是复述：标题说"做了什么"，explain 补"为了什么、结果说明什么"。',
+  '  - 不要编号、不要引号、不要换行；不要照抄英文原句。',
   '另外，如果给了「工具说明」，把每条**翻译成中文短句**（8~16 个汉字，动词开头，',
   '  不要解释、不要加引号、不要保留英文）：这些是命令自带的说明，要贴在对应命令的标题后面。',
   '如果给了「本轮最后的输出」，再为**整轮**写一条标题（字段 turnTitle）：',
@@ -85,8 +92,8 @@ export const TITLE_SYSTEM = [
   '- 8~18 个汉字，一句话说清这一轮**要什么 / 做了什么 / 结果如何**，让人扫一眼就知道这轮是干嘛的。',
   '- 以用户这一轮的诉求或最终结论为主，不要罗列步骤，不要写"思考""分析"这种空词。',
   '- 不要编号、不要标点结尾、不要引号、不要换行。没给「本轮最后的输出」时 turnTitle 给空字符串。',
-  '严格按 JSON 输出，形如 {"titles":["第一条","第二条"],"notes":{"工具id":"中文说明"},"turnTitle":"整轮标题"}。',
-  '  titles 的条数必须与步骤数完全一致；notes 只包含给到的那些工具 id；turnTitle 没有就给 ""。',
+  '严格按 JSON 输出，形如 {"steps":[{"title":"第一步标题","explain":"这一步在做什么的解释"}],"notes":{"工具id":"中文说明"},"turnTitle":"整轮标题"}。',
+  '  steps 的条数必须与步骤数完全一致、顺序对应；notes 只包含给到的那些工具 id；turnTitle 没有就给 ""。',
   '除了这段 JSON 不要输出任何其它内容。',
 ].join('\n')
 
@@ -124,6 +131,8 @@ export const TURN_OUTPUT_CHARS = 1200
 /** 解析结果。 */
 export interface ParsedTitles {
   readonly titles: readonly string[]
+  /** 每条标题配套的中文解释（老格式 / 模型没给时是空串）。 */
+  readonly explains: readonly string[]
   /** 工具说明的中文翻译，key = 工具 id。没有就给空对象。 */
   readonly notes: Record<string, string>
   /** 整轮标题。模型没给（或给了空串）就是空字符串。 */
@@ -160,7 +169,10 @@ export function parseTitles(raw: string, expected: number): ParsedTitles | undef
   } catch {
     return undefined
   }
-  const arr = (data as { titles?: unknown } | null)?.titles
+  /** 新格式是 steps:[{title,explain}]；老缓存/老模型给 titles:["…"] 也兼容。 */
+  const arr = Array.isArray((data as { steps?: unknown } | null)?.steps)
+    ? (data as { steps: unknown[] }).steps
+    : (data as { titles?: unknown } | null)?.titles
   /**
    * ⚠️ `expected === 0` 表示"这次**不要**步骤标题"（只缺说明翻译或整轮标题）。
    *
@@ -172,9 +184,21 @@ export function parseTitles(raw: string, expected: number): ParsedTitles | undef
     if (!Array.isArray(arr)) return undefined
     if (arr.length !== expected) return undefined
   }
-  const rawTitles = Array.isArray(arr) ? arr : []
-  const titles = rawTitles.map((t) => (typeof t === 'string' ? t.replace(/\s+/g, ' ').trim() : ''))
+  const rawSteps = Array.isArray(arr) ? (arr as unknown[]) : []
+  const rawTitleOf = (t: unknown): string =>
+    typeof t === 'string' ? t : typeof (t as { title?: unknown } | null)?.title === 'string' ? String((t as { title: string }).title) : ''
+  const titles = rawSteps.map((t) => rawTitleOf(t).replace(/\s+/g, ' ').trim())
   if (expected > 0 && titles.some((t) => t === '')) return undefined
+  /**
+   * 中文解释：和标题同一条目里的第二个字段。
+   * 老格式（只有一个字符串）没有解释 ⇒ 这里给空串，上层据此不下发、客户端不渲染那一行。
+   */
+  const explains = rawSteps.map((t) => {
+    const rawEx = typeof t === 'object' && t !== null && typeof (t as { explain?: unknown }).explain === 'string'
+      ? String((t as { explain: string }).explain)
+      : ''
+    return rawEx.replace(/\s+/g, ' ').trim().replace(/^[「"']|[」"']$/g, '').slice(0, MAX_EXPLAIN_CHARS)
+  })
   // notes 宽容处理：不是对象 / 有条目坏了，都只丢那一条 —— 它只是锦上添花，
   // 不该因为它把整轮标题一起否掉（titles 的条数才是硬约束）
   const notes: Record<string, string> = {}
@@ -193,6 +217,7 @@ export function parseTitles(raw: string, expected: number): ParsedTitles | undef
     : ''
   return {
     titles: titles.map((t) => t.replace(/^\s*\d+[.、)]\s*/, '').replace(/[。；;]\s*$/, '')),
+    explains,
     notes,
     turnTitle,
   }
