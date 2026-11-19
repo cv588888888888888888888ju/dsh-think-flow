@@ -1,6 +1,6 @@
 {
   "name": "dsh-think-flow-zh",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "DSH 思维链可视化（中文增强 fork）：在把实时思考按 turn → step 聚合的基础上，用**另一个模型**给每一步生成中文标题与中文解释、给整轮生成中文标题，主模型的提示词与上下文一概不动",
   "type": "module",
   "main": "./lib/index.js",

@@ -310,6 +310,11 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
   async function generateBatch(
     sessionId: string,
     pending: { steps: TitleInputStep[]; notes: TitleInputNote[]; turnOutput?: string },
+    /**
+     * 每**段**成功就回调一次 —— 大轮次（100+ 步、分十几段）时让面板边生成边出标题，
+     * 而不是从头到尾一片空白、最后全有一起跳出来。回调可以 async（写缓存 / 推 SSE）。
+     */
+    onPart?: (part: { titles: Record<string, string>; explains: Record<string, string>; notes: Record<string, string>; turnTitle?: string; model: string }) => void | Promise<void>,
   ): Promise<{ titles: Record<string, string>; explains: Record<string, string>; notes: Record<string, string>; turnTitle?: string; model: string; error?: string }> {
     const { steps: inputs, notes: notesIn } = pending
     const turnOutput = pending.turnOutput ?? ''
@@ -350,6 +355,15 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
       Object.assign(explains, got.explains)
       Object.assign(notes, got.notes)
       if (got.turnTitle !== undefined) turnTitle = got.turnTitle
+      if (onPart !== undefined) {
+        await onPart({
+          titles: got.titles,
+          explains: got.explains,
+          notes: got.notes,
+          ...(got.turnTitle !== undefined ? { turnTitle: got.turnTitle } : {}),
+          model,
+        })
+      }
     }
     // 一段都没成：把最后一次的错误交上去（手动点按钮那条路要让用户看见原因）
     if (Object.keys(titles).length === 0 && Object.keys(notes).length === 0 && turnTitle === undefined) {
@@ -461,9 +475,15 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
       return { titles, explains, notes, ...(cachedTurnTitle !== undefined ? { turnTitle: cachedTurnTitle } : {}), cached: true }
     }
 
-    const got = await generateBatch(sessionId, pending)
+    /** 手动点按钮也一样：边生成边落盘、边推 SSE，别让人对着空白等一整轮。 */
+    let streamed = false
+    const got = await generateBatch(sessionId, pending, async (part) => {
+      streamed = true
+      await mergeIntoCache(sessionId, turn, part, part.model)
+      pushTitles(sessionId, turn.turn, part.titles, part.explains, part.notes, part.turnTitle)
+    })
     if (got.error !== undefined) return { titles, explains, notes, cached: false, error: got.error }
-    await mergeIntoCache(sessionId, turn, got, got.model)
+    if (!streamed) await mergeIntoCache(sessionId, turn, got, got.model)
     const turnTitle = got.turnTitle !== undefined && got.turnTitle !== '' ? got.turnTitle : cachedTurnTitle
     return {
       titles: { ...titles, ...got.titles },
@@ -575,8 +595,14 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
       autoBusy.add(sessionId)
       pushAutoBusy(sessionId, true)
       let got: Awaited<ReturnType<typeof generateBatch>>
+      /** 任一段成功就已经边生成边落盘、边推 SSE；结尾不必再整批合并一次。 */
+      let streamed = false
       try {
-        got = await generateBatch(sessionId, pending)
+        got = await generateBatch(sessionId, pending, async (part) => {
+          streamed = true
+          await mergeIntoCache(sessionId, turn, part, part.model)
+          pushTitles(sessionId, turn.turn, part.titles, part.explains, part.notes, part.turnTitle)
+        })
       } finally {
         // 无论成功失败都要把脉冲收掉，否则胶囊会一直闪（看起来像卡住了）
         autoBusy.delete(sessionId)
@@ -590,8 +616,10 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
       }
       autoFails.delete(sessionId)
       autoRetryAt.delete(sessionId)
-      await mergeIntoCache(sessionId, turn, got, got.model)
-      pushTitles(sessionId, turn.turn, got.titles, got.explains, got.notes, got.turnTitle)
+      if (!streamed) {
+        await mergeIntoCache(sessionId, turn, got, got.model)
+        pushTitles(sessionId, turn.turn, got.titles, got.explains, got.notes, got.turnTitle)
+      }
     }
   }
 
