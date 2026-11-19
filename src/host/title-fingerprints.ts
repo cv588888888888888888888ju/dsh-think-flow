@@ -10,7 +10,9 @@ import type { StepFact, TurnFact } from '../trace.js'
  * @returns 指纹串。
  */
 export function stepPrint(s: StepFact): string {
-  return s.reasoning.length + ':' + s.reasoning.slice(0, 24)
+  if (s.reasoning.length > 0) return s.reasoning.length + ':' + s.reasoning.slice(0, 24)
+  // 没有思考的步：指纹取工具名 + 参数长度/开头，否则永远是 '0:'（参数变了也判不出来）
+  return 'T' + s.tools.map((t) => t.name + ':' + t.argsRaw.length + ':' + t.argsRaw.slice(0, 12)).join('|')
 }
 
 /**

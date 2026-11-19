@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { createSystemMessage, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { buildTitleUser, parseTitles, TITLE_SYSTEM, type TitleBudget, type TitleInputNote, type TitleInputStep } from '../titles.js'
-import { COMMAND_TOOLS, lastTurn, type TurnFact } from '../trace.js'
+import { COMMAND_TOOLS, lastTurn, type StepFact, type TurnFact } from '../trace.js'
 import type { Config } from './config.js'
 import type { SessionEntry, Subscriber, TitleCache, TitleCacheEntry } from './types.js'
 import { stepPrint, turnPrint, turnOutputOf } from './title-fingerprints.js'
@@ -24,6 +24,9 @@ import { stepPrint, turnPrint, turnOutputOf } from './title-fingerprints.js'
 function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
   timer.unref?.()
 }
+
+/** 重试前等一会儿（不 unref：这段等待是生成的一部分，别让宿主提前退出时留半截任务）。 */
+const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) })
 
 /** Owns title generation, cache and the opt-in batch scheduler. */
 export function createTitleService(ctx: Context, config: Config, sessions: Map<string, SessionEntry>, send: (sub: Subscriber, payload: unknown) => void) {
@@ -116,11 +119,37 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     return undefined
   }
 
+  /**
+   * 这一步值不值得要标题。
+   *
+   * 有思考的步照旧；**没有思考但有工具调用的步也要** —— 真机里 run_code 步常常只发工具、
+   * 不发思考，面板上就只剩一行原始参数（\`run_code {"code":…\`），读者看不懂它在干什么。
+   * 后者要求步已结束：工具还没记全时给标题，只会写出"正在调用工具"这种空话。
+   * @param s - 该步。
+   * @returns 要不要。
+   */
+  function titleable(s: StepFact): boolean {
+    if (s.reasoning.length > 0) return true
+    return s.endedAt !== undefined && s.tools.length > 0
+  }
+
+  /** 没有思考的步：把工具调用压成素材（工具名 + 参数里的说明 / 参数开头）。 */
+  function toolMaterialOf(s: StepFact): string {
+    return s.tools
+      .map((t) => t.name + '｜' + (t.note ?? t.argsRaw.replace(/\s+/g, ' ').slice(0, 240)))
+      .join('\n')
+  }
+
+  /** 一步 → 标题输入（有思考用思考，没有就用工具调用）。 */
+  function titleInputOf(s: StepFact): TitleInputStep {
+    const base = { step: s.step, tools: s.tools.map((t) => t.name) }
+    if (s.reasoning.length > 0) return { ...base, reasoning: s.reasoning }
+    return { ...base, reasoning: toolMaterialOf(s), toolOnly: true }
+  }
+
   /** 把一个 turn 的步骤整理成标题输入。 */
   function titleInputsOf(turn: TurnFact): TitleInputStep[] {
-    return turn.steps
-      .filter((s) => s.reasoning.length > 0)
-      .map((s) => ({ step: s.step, reasoning: s.reasoning, tools: s.tools.map((t) => t.name) }))
+    return turn.steps.filter(titleable).map(titleInputOf)
   }
 
   /**
@@ -157,10 +186,10 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     const steps: TitleInputStep[] = []
     const notes: TitleInputNote[] = []
     for (const s of turn.steps) {
-      if (s.reasoning.length === 0) continue
+      if (!titleable(s)) continue
       const hit = entry?.steps?.[String(s.step)]
       if (hit !== undefined && hit.print === stepPrint(s)) continue
-      steps.push({ step: s.step, reasoning: s.reasoning, tools: s.tools.map((t) => t.name) })
+      steps.push(titleInputOf(s))
     }
     // 说明要翻成中文贴在**派生标题**后面，而派生标题是给"没有思考的步"用的 ——
     // 所以这里不能按"有思考"过滤，否则恰恰漏掉最需要它的那些步（没有思考的纯工具步）。
@@ -296,6 +325,10 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     for (let i = 0; i < inputs.length; i += MAX_STEPS_PER_CALL) chunks.push(inputs.slice(i, i + MAX_STEPS_PER_CALL))
     if (chunks.length === 0) chunks.push([])
 
+    /** 单段最多试几次：免费 lane 偶发超时或返回条数不足，重试一次多半就好。 */
+    const MAX_ATTEMPTS = 3
+    /** 两次尝试之间等多久 —— 刚失败就再撞一次只会更糟。 */
+    const RETRY_BACKOFF_MS = [600, 1800]
     const titles: Record<string, string> = {}
     const explains: Record<string, string> = {}
     const notes: Record<string, string> = {}
@@ -304,11 +337,15 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
     for (let ci = 0; ci < chunks.length; ci += 1) {
       const isLast = ci === chunks.length - 1
       // 工具说明与整轮输出各只要一次，摊在第一段 / 最后一段上，别每段都发
-      const got = await callOnce(sessionId, route, chunks[ci], ci === 0 ? notesIn : [], isLast ? turnOutput : '')
-      if (got.error !== undefined) {
+      let got: Awaited<ReturnType<typeof callOnce>> | undefined
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+        got = await callOnce(sessionId, route, chunks[ci], ci === 0 ? notesIn : [], isLast ? turnOutput : '')
+        if (got.error === undefined) break
         lastError = got.error
-        continue
+        const wait = RETRY_BACKOFF_MS[attempt]
+        if (wait !== undefined) await sleep(wait)
       }
+      if (got === undefined || got.error !== undefined) continue
       Object.assign(titles, got.titles)
       Object.assign(explains, got.explains)
       Object.assign(notes, got.notes)
@@ -450,6 +487,12 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
   const autoLastFlush = new Map<string, number>()
   /** 此刻正在生成的那几个会话 —— 面板上「实时」那枚要脉冲，用户才知道它在干活。 */
   const autoBusy = new Set<string>()
+  /** 连续失败次数与"下次可以再试"的时刻 —— 失败后别每 5 秒再锤一次免费 lane。 */
+  const autoFails = new Map<string, number>()
+  const autoRetryAt = new Map<string, number>()
+  /** 失败退避的起点与上限。 */
+  const AUTO_RETRY_BASE_MS = 30_000
+  const AUTO_RETRY_MAX_MS = 300_000
 
   /** 攒够几步就刷 —— 一步一次调用的话**系统提示词每步都要重发**（实测输入约 2×）。 */
   const AUTO_MIN_STEPS = 3
@@ -510,6 +553,8 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
       const e = sessions.get(sessionId)
       if (e === undefined) { autoDirty.delete(sessionId); continue }
       if (e.subs.size === 0) continue
+      // 上一拍失败过：退避到点之前别再试（一段失败后每 5 秒重试 = 白烧免费额度）
+      if ((autoRetryAt.get(sessionId) ?? 0) > Date.now()) continue
       const turn = lastTurn(e.trace)
       if (turn === undefined) { autoDirty.delete(sessionId); continue }
       const cache = await loadTitleCache()
@@ -537,7 +582,14 @@ export function createTitleService(ctx: Context, config: Config, sessions: Map<s
         autoBusy.delete(sessionId)
         pushAutoBusy(sessionId, false)
       }
-      if (got.error !== undefined) continue
+      if (got.error !== undefined) {
+        const fails = (autoFails.get(sessionId) ?? 0) + 1
+        autoFails.set(sessionId, fails)
+        autoRetryAt.set(sessionId, Date.now() + Math.min(AUTO_RETRY_MAX_MS, AUTO_RETRY_BASE_MS * 2 ** (fails - 1)))
+        continue
+      }
+      autoFails.delete(sessionId)
+      autoRetryAt.delete(sessionId)
       await mergeIntoCache(sessionId, turn, got, got.model)
       pushTitles(sessionId, turn.turn, got.titles, got.explains, got.notes, got.turnTitle)
     }

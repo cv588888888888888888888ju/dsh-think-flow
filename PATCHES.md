@@ -42,13 +42,18 @@
 - `generateTitles()`：命中缓存时把 `explain` 一起收回；返回值带 `explains`。
 - `pushTitles()`：SSE `titles` 消息带上 `explains`（空则不推）。
 - 新增 `armAuto(sessionId)`：`autoTitlesOn` 为真时，面板 SSE 一连上就自动开启标题。
+- `titleable()` / `titleInputOf()` / `toolMaterialOf()`：**没有思考、只有工具调用的步**也纳入标题生成，
+  素材换成工具名 + 参数（`run_code` 的 `code` / `description` 前 240 字）。
+  以前这种步只有一行原始参数（`run_code {"code":…`），读者看不懂它在干什么。
+- `generateBatch()` **分段重试**：每段最多 3 次，间隔 600ms / 1800ms；某段三次都失败才丢那几步。
+- 自动节拍器**失败退避**：连续失败按 30s → 60s → … → 300s 退避，不再每 5s 撞一次免费通道。
 
 ### `src/host/snapshots.ts`
 - `turnSnapshot()` 增加 `explains`（按步号索引的对象，和 `titles` 一样要指纹对得上才下发）。
 
 ### `src/host/routes.ts`
 - SSE 订阅成功后调用 `titles.armAuto(sessionId)`。
-- `/api/ping` 的 `build` 24 → **27**（重启后用它确认新代码在跑）。
+- `/api/ping` 的 `build` 24 → **28**（重启后用它确认新代码在跑）。
 
 ### `src/host/types.ts`
 - 标题缓存条目 `steps[key]` 增加可选 `explain`。
@@ -86,7 +91,8 @@
 
 | 轮次步数 | 耗时 | 结果 |
 | --- | --- | --- |
-| 113 步 | 49.2s | 71 条标题（只有带思考的步才有标题） |
+| 113 步 | 49.2s | 71 条标题（当时只给带思考的步） |
+| 24 步（含 7 个无思考的工具步） | 14.0s | 23/23，无思考的步也拿到了标题 + 解释 |
 | 20 步 | 13.7s | 20/20 |
 | 11 步 | 10.2s | 11/11 |
 | 7 步 | 4.0–5.6s | 7/7 |
@@ -106,11 +112,11 @@ npm test           # 900+ 断言
 
 ## 已知副作用
 
-某一段持续失败时，自动节拍器每 5s 会重试一次（`autoDirty` 不清理）。分段后整批失败少见，
-但仍是个隐患 —— 若观察到持续请求，可给失败段加退避。
+- 失败退避期间该会话的标题会停更（最长 5 分钟），期间步照常在面板上滚，只是没有中文标题。
+- 无思考的工具步也要调模型，轮次很长时调用次数会略增（每段多算几步，仍在 10 步/段的批量里）。
 
 ## 与上游的关系
 
 - 上游版本：0.3.3（MIT）。
-- 本 fork 版本：0.4.0，包名 `dsh-think-flow-zh`，插件 id 仍是 `think-flow`。
+- 本 fork 版本：0.4.1，包名 `dsh-think-flow-zh`，插件 id 仍是 `think-flow`。
 - 与上游**不能同时安装**（同一个插件 id）。

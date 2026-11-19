@@ -27,6 +27,13 @@ export interface TitleInputStep {
   readonly tools: readonly string[]
   /** 该步各工具自带的英文说明（可选；`bash` 的 `description` 就是这个）。 */
   readonly notes?: readonly TitleInputNote[]
+  /**
+   * 这一**没有思考**，只有工具调用（素材来自工具名与参数）。
+   *
+   * 真机踩过：模型只发工具、不发思考时，这步就只剩 `run_code {"code":…` 这种原文，
+   * 读者看不懂它在干什么。所以也要给它一条标题 + 解释，只是素材换成工具调用本身。
+   */
+  readonly toolOnly?: boolean
 }
 
 /** 构造提示词时的上限。 */
@@ -94,6 +101,8 @@ export const TITLE_SYSTEM = [
   '- 不要编号、不要标点结尾、不要引号、不要换行。没给「本轮最后的输出」时 turnTitle 给空字符串。',
   '严格按 JSON 输出，形如 {"steps":[{"title":"第一步标题","explain":"这一步在做什么的解释"}],"notes":{"工具id":"中文说明"},"turnTitle":"整轮标题"}。',
   '  steps 的条数必须与步骤数完全一致、顺序对应；notes 只包含给到的那些工具 id；turnTitle 没有就给 ""。',
+  '有的步骤标注了「本步无思考」：它没有思考原文，素材只有工具名与参数。',
+  '  这种步骤照常给 title 与 explain —— 说清它**在跑什么、想从结果里拿到什么**，别写"调用了工具"这种空话。',
   '除了这段 JSON 不要输出任何其它内容。',
 ].join('\n')
 
@@ -112,7 +121,8 @@ export function buildTitleUser(
   const per = allocateChars(steps, budget)
   const lines = steps.map((s) => {
     const tools = s.tools.length ? s.tools.join(', ') : '（未调用工具）'
-    return `#${s.step}｜工具：${tools}\n${clipReasoning(s.reasoning, per)}`
+    const tag = s.toolOnly === true ? '（本步无思考，只有工具调用）' : ''
+    return `#${s.step}｜工具：${tools}${tag}\n${clipReasoning(s.reasoning, per)}`
   })
   const head = `共 ${steps.length} 步，请给出 ${steps.length} 条标题。`
   const noteBlock = notes.length === 0 ? '' :

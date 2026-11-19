@@ -273,7 +273,7 @@ export function registerRoutes(ctx: Context, config: Config, { sessions, stats, 
        * 改宿主代码后 `dsh web` 必须重启（ESM 缓存），重启完用
        * `curl -s localhost:3080/think-flow/api/ping` 看这个号对不对。
        */
-      build: 27,
+      build: 28,
       sessions: sessions.size,
       stats,
       config,
